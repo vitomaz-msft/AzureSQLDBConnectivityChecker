@@ -15,6 +15,37 @@ if ($null -ne $parameters) {
     $serversToCheck = $parameters['serversToCheck']
 }
 
+function PrintDNSResults($dnsResult, [string] $dnsSource) {
+    if ($dnsResult) {
+        Write-Host 'Found DNS record in' $dnsSource '(IP Address:'$dnsResult.IPAddress')'
+    }
+    else {
+        Write-Host 'Could not found DNS record in' $dnsSource
+    }
+}
+
+function ValidateDNS([String] $serverName) {
+    Try {
+        Write-Host 'Validating DNS record for' $serverName
+
+        $DNSfromHosts = Resolve-DnsName -Name $serverName -CacheOnly -ErrorAction SilentlyContinue
+        PrintDNSResults $DNSfromHosts 'hosts file'
+
+        $DNSfromCache = Resolve-DnsName -Name $serverName -NoHostsFile -CacheOnly -ErrorAction SilentlyContinue
+        PrintDNSResults $DNSfromCache 'cache'
+
+        $DNSfromCustomerServer = Resolve-DnsName -Name $serverName -DnsOnly -ErrorAction SilentlyContinue
+        PrintDNSResults $DNSfromCustomerServer 'DNS server'
+
+        $DNSfromAzureDNS = Resolve-DnsName -Name $serverName -DnsOnly -Server 208.67.222.222 -ErrorAction SilentlyContinue
+        PrintDNSResults $DNSfromAzureDNS 'Open DNS'
+    }
+    Catch {
+        Write-Host "Error at ValidateDNS" -Foreground Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+    }
+}
+
 $gateways = @(
     New-Object PSObject -Property @{Region = "Australia Central"; Gateways = ("20.36.105.0"); Affected20191014 = $false }
     New-Object PSObject -Property @{Region = "Australia Central2"; Gateways = ("20.36.113.0"); Affected20191014 = $false }
@@ -74,7 +105,7 @@ Try {
         | Add-Member -PassThru NoteProperty baseType 'EventData' `
         | Add-Member -PassThru NoteProperty baseData (New-Object PSObject `
             | Add-Member -PassThru NoteProperty ver 2 `
-            | Add-Member -PassThru NoteProperty name '0.3'));
+            | Add-Member -PassThru NoteProperty name '0.4'));
 
 $body = $body | ConvertTo-JSON -depth 5;
 Invoke-WebRequest -Uri 'https://dc.services.visualstudio.com/v2/track' -Method 'POST' -UseBasicParsing -body $body > $null
@@ -83,7 +114,7 @@ Catch { }
 
 Clear-Host
 Write-Host '******************************************' -ForegroundColor Green
-Write-Host '  Azure SQL DB Connectivity Checker v0.3  ' -ForegroundColor Green
+Write-Host '  Azure SQL DB Connectivity Checker v0.4  ' -ForegroundColor Green
 Write-Host '******************************************' -ForegroundColor Green
 Write-Host
 
@@ -95,6 +126,9 @@ foreach ($serverName in $serversToCheck) {
         Write-Host
         Write-Host '##### Testing' $serverName '#####' -ForegroundColor Green
         Write-Host
+
+        ValidateDNS $serverName
+
         try {
             $CR = [System.Net.DNS]::GetHostEntry($ServerName)
         }
@@ -104,6 +138,10 @@ foreach ($serverName in $serversToCheck) {
         }
         $CRaddress = $CR.AddressList[0].IPAddressToString
         $gateway = $gateways | Where-Object { $_.Gateways -eq $CRaddress }
+        if (!$gateway) {
+            Write-Host 'ERROR:' $CRaddress 'is not a valid gateway address, please check the DNS resolution' -ForegroundColor Red
+            continue
+        }
         $isCR1 = $CRaddress -eq $gateway.Gateways[0]
 
         Write-Host 'The server' $serverName 'is running on' $gateway.Region
