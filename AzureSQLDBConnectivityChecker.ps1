@@ -7,7 +7,9 @@
 #FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
 #WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-$serversToCheck = @('', '', '') #provide one or more, like @('server1', 'server2', 'server3'), you can add more than 3
+#provide one or more, like @('server1', 'server2', 'server3'), you can add more than 3
+#if Managed Instance, please provide FQDN, MI public endpoint is supported
+$serversToCheck = @('', '', '')
 
 # Parameter region when Invoke-Command -ScriptBlock is used
 $parameters = $args[0]
@@ -44,6 +46,14 @@ function ValidateDNS([String] $serverName) {
         Write-Host "Error at ValidateDNS" -Foreground Red
         Write-Host $_.Exception.Message -ForegroundColor Red
     }
+}
+
+function IsManagedInstance([String] $serverName) {
+    return [bool]((($serverName.ToCharArray() | Where-Object { $_ -eq '.' } | Measure-Object).Count) -ge 4)
+}
+
+function IsManagedInstancePublicEndpoint([String] $serverName) {
+    return [bool]((IsManagedInstance $serverName) -and ($serverName -match '.public.'))
 }
 
 $gateways = @(
@@ -88,6 +98,7 @@ $gateways = @(
     New-Object PSObject -Property @{Region = "West US 2"; Gateways = ("13.66.226.202"); Affected20191014 = $false }
 )
 $TRPorts = @('11000', '11001', '11010', '11020', '11050')
+$gatewayPort = 1433
 
 Try {
     #Despite computername and username will be used to calculate a hash string, this will keep you anonymous but allow us to identify multiple runs from the same user
@@ -105,16 +116,35 @@ Try {
         | Add-Member -PassThru NoteProperty baseType 'EventData' `
         | Add-Member -PassThru NoteProperty baseData (New-Object PSObject `
             | Add-Member -PassThru NoteProperty ver 2 `
-            | Add-Member -PassThru NoteProperty name '0.4'));
+            | Add-Member -PassThru NoteProperty name '0.5'));
 
 $body = $body | ConvertTo-JSON -depth 5;
 Invoke-WebRequest -Uri 'https://dc.services.visualstudio.com/v2/track' -Method 'POST' -UseBasicParsing -body $body > $null
 }
 Catch { }
 
+function CheckAffected20191014($gateway) {
+    $isCR1 = $CRaddress -eq $gateway.Gateways[0]
+    if ($gateway.Affected20191014) {
+        Write-Host 'This region WILL be affected by the Gateway migration starting at Oct 14 2019!' -ForegroundColor Yellow
+        if ($isCR1) {
+            Write-Host 'and this server is running on one of the affected Gateways' -ForegroundColor Red
+        }
+        else {
+            Write-Host 'but this server is NOT running on one of the affected Gateways (never was or already migrated)' -ForegroundColor Green
+            Write-Host 'Please check other servers you may have in the region' -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host 'This region will NOT be affected by the Oct 14 2019 Gateway migration!' -ForegroundColor Green
+    }
+    Write-Host
+}
+
+$ProgressPreference = "SilentlyContinue";
 Clear-Host
 Write-Host '******************************************' -ForegroundColor Green
-Write-Host '  Azure SQL DB Connectivity Checker v0.4  ' -ForegroundColor Green
+Write-Host '  Azure SQL DB Connectivity Checker v0.5  ' -ForegroundColor Green
 Write-Host '******************************************' -ForegroundColor Green
 Write-Host
 
@@ -137,42 +167,45 @@ foreach ($serverName in $serversToCheck) {
             continue
         }
         $CRaddress = $CR.AddressList[0].IPAddressToString
-        $gateway = $gateways | Where-Object { $_.Gateways -eq $CRaddress }
-        if (!$gateway) {
-            Write-Host 'ERROR:' $CRaddress 'is not a valid gateway address, please check the DNS resolution' -ForegroundColor Red
-            continue
-        }
-        $isCR1 = $CRaddress -eq $gateway.Gateways[0]
-
-        Write-Host 'The server' $serverName 'is running on' $gateway.Region
         Write-Host 'The current gateway IP address is' $CRaddress
-        Write-Host
-        if ($gateway.Affected20191014) {
-            Write-Host 'This region WILL be affected by the Gateway migration starting at Oct 14 2019!' -ForegroundColor Yellow
-            if ($isCR1) {
-                Write-Host 'and this server is running on one of the affected Gateways' -ForegroundColor Red
+        $gatewayPort = 1433
+
+        if (IsManagedInstance $serverName) {
+            if (IsManagedInstancePublicEndpoint $serverName) {
+                $gatewayPort = 3342
+                Write-Host 'Detected as Managed Instance using Public Endpoint'
             }
             else {
-                Write-Host 'but this server is NOT running on one of the affected Gateways (never was or already migrated)' -ForegroundColor Green
-                Write-Host 'Please check other servers you may have in the region' -ForegroundColor Yellow
+                Write-Host 'Detected as Managed Instance'
             }
+            $gateway = New-Object PSObject -Property @{Gateways = ($CRaddress) }
         }
         else {
-            Write-Host 'This region will NOT be affected by the Oct 14 2019 Gateway migration!' -ForegroundColor Green
+            $gateway = $gateways | Where-Object { $_.Gateways -eq $CRaddress }
+            if (!$gateway -and !(IsManagedInstance $serverName)) {
+                Write-Host 'ERROR:' $CRaddress 'is not a valid gateway address, please check the DNS resolution' -ForegroundColor Red
+                continue
+            }
+            Write-Host 'The server' $serverName 'is running on' $gateway.Region
+            Write-Host
+            CheckAffected20191014 $gateway
         }
-        Write-Host
 
+        Write-Host 'Running tests...please wait' -ForegroundColor Yellow
         foreach ($gatewayAddress in $gateway.Gateways) {
-            $testResult = Test-NetConnection $gatewayAddress -Port 1433 -WarningAction SilentlyContinue
+            $testResult = Test-NetConnection $gatewayAddress -Port $gatewayPort -WarningAction SilentlyContinue
 
             if ($testResult.TcpTestSucceeded) {
-                Write-Host 'Tested (gateway) connectivity to' $gatewayAddress':1433 -> TCP test succeed' -ForegroundColor Green
+                Write-Host 'Tested (gateway) connectivity to' $gatewayAddress':'$gatewayPort' -> TCP test succeed' -ForegroundColor Green
             }
             else {
                 Write-Host
-                Write-Host 'Tested (gateway) connectivity to' $gatewayAddress':1433 -> TCP test FAILED' -ForegroundColor Red
-                Write-Host 'Please make sure you fix the connectivity from this machine to' $gatewayAddress':1433 to avoid issues!' -ForegroundColor Red
+                Write-Host 'Tested (gateway) connectivity to' $gatewayAddress':'$gatewayPort' -> TCP test FAILED' -ForegroundColor Red
+                Write-Host 'Please make sure you fix the connectivity from this machine to' $gatewayAddress':'$gatewayPort' to avoid issues!' -ForegroundColor Red
                 Write-Host
+                Write-Host 'IP routes for interface:' $testResult.InterfaceAlias
+                Get-NetAdapter $testResult.InterfaceAlias | Get-NetRoute
+                tracert -h 10 $serverName
             }
         }
 
