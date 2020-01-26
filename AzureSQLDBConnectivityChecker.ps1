@@ -19,16 +19,16 @@ if ($null -ne $parameters) {
 
 function PrintDNSResults($dnsResult, [string] $dnsSource) {
     if ($dnsResult) {
-        Write-Host 'Found DNS record in' $dnsSource '(IP Address:'$dnsResult.IPAddress')'
+        Write-Host ' Found DNS record in' $dnsSource '(IP Address:'$dnsResult.IPAddress')'
     }
     else {
-        Write-Host 'Could not found DNS record in' $dnsSource
+        Write-Host ' Could not found DNS record in' $dnsSource
     }
 }
 
 function ValidateDNS([String] $serverName) {
     Try {
-        Write-Host 'Validating DNS record for' $serverName
+        Write-Host 'Validating DNS record for' $serverName -ForegroundColor Green
 
         $DNSfromHosts = Resolve-DnsName -Name $serverName -CacheOnly -ErrorAction SilentlyContinue
         PrintDNSResults $DNSfromHosts 'hosts file'
@@ -54,6 +54,20 @@ function IsManagedInstance([String] $serverName) {
 
 function IsManagedInstancePublicEndpoint([String] $serverName) {
     return [bool]((IsManagedInstance $serverName) -and ($serverName -match '.public.'))
+}
+
+function FilterTranscript() {
+    Try {
+        if ($canWriteFiles) {
+            $lineNumber = (Select-String -Path $file -Pattern '..TranscriptStart..').LineNumber
+            if ($lineNumber) {
+                (Get-Content $file | Select-Object -Skip $lineNumber) | Set-Content $file
+            }
+        }
+    }
+    Catch {
+        Write-Host $_.Exception.Message -ForegroundColor Red
+    }
 }
 
 $gateways = @(
@@ -98,7 +112,6 @@ $gateways = @(
     New-Object PSObject -Property @{Region = "West US 2"; Gateways = ("13.66.226.202"); Affected20191014 = $false }
 )
 $TRPorts = @('11000', '11001', '11010', '11020', '11050')
-$gatewayPort = 1433
 
 Try {
     #Despite computername and username will be used to calculate a hash string, this will keep you anonymous but allow us to identify multiple runs from the same user
@@ -116,10 +129,10 @@ Try {
         | Add-Member -PassThru NoteProperty baseType 'EventData' `
         | Add-Member -PassThru NoteProperty baseData (New-Object PSObject `
             | Add-Member -PassThru NoteProperty ver 2 `
-            | Add-Member -PassThru NoteProperty name '0.5'));
+            | Add-Member -PassThru NoteProperty name '0.6'));
 
-$body = $body | ConvertTo-JSON -depth 5;
-Invoke-WebRequest -Uri 'https://dc.services.visualstudio.com/v2/track' -Method 'POST' -UseBasicParsing -body $body > $null
+    $body = $body | ConvertTo-JSON -depth 5;
+    Invoke-WebRequest -Uri 'https://dc.services.visualstudio.com/v2/track' -Method 'POST' -UseBasicParsing -body $body > $null
 }
 Catch { }
 
@@ -142,105 +155,161 @@ function CheckAffected20191014($gateway) {
 }
 
 $ProgressPreference = "SilentlyContinue";
-Clear-Host
-Write-Host '******************************************' -ForegroundColor Green
-Write-Host '  Azure SQL DB Connectivity Checker v0.5  ' -ForegroundColor Green
-Write-Host '******************************************' -ForegroundColor Green
-Write-Host
 
-foreach ($serverName in $serversToCheck) {
-    if ($serverName -and $serverName.Length -gt 0) {
-        if (!$serverName.EndsWith('.database.windows.net')) {
-            $serverName = $serverName + '.database.windows.net'
+Try {
+    Clear-Host
+    $canWriteFiles = $true
+    Try {
+        If (!(Test-Path AzureSQLDBConnectivityChecker)) {
+            New-Item AzureSQLDBConnectivityChecker -ItemType directory | Out-Null
         }
-        Write-Host
-        Write-Host '##### Testing' $serverName '#####' -ForegroundColor Green
-        Write-Host
+        Set-Location AzureSQLDBConnectivityChecker
+        $outFolderName = [System.DateTime]::Now.ToString('yyyyMMddTHHmmss')
+        New-Item $outFolderName -ItemType directory | Out-Null
+        Set-Location $outFolderName
+        $file = '.\Log.txt'
+        Start-Transcript -Path $file
+        Write-Host '..TranscriptStart..'
+    }
+    Catch {
+        $canWriteFiles = $false
+        Write-Host Warning: Cannot write files -ForegroundColor Yellow
+    }
 
-        ValidateDNS $serverName
+    Try {
+        Write-Host '******************************************' -ForegroundColor Green
+        Write-Host '  Azure SQL DB Connectivity Checker v0.6  ' -ForegroundColor Green
+        Write-Host '******************************************' -ForegroundColor Green
 
-        try {
-            $CR = [System.Net.DNS]::GetHostEntry($ServerName)
-        }
-        catch {
-            Write-Host 'ERROR: Name resolution of' $serverName 'failed' -ForegroundColor Red
-            continue
-        }
-        $CRaddress = $CR.AddressList[0].IPAddressToString
-        Write-Host 'The current gateway IP address is' $CRaddress
-        $gatewayPort = 1433
-
-        if (IsManagedInstance $serverName) {
-            if (IsManagedInstancePublicEndpoint $serverName) {
-                $gatewayPort = 3342
-                Write-Host 'Detected as Managed Instance using Public Endpoint'
-            }
-            else {
-                Write-Host 'Detected as Managed Instance'
-            }
-            $gateway = New-Object PSObject -Property @{Gateways = ($CRaddress) }
-        }
-        else {
-            $gateway = $gateways | Where-Object { $_.Gateways -eq $CRaddress }
-            if (!$gateway -and !(IsManagedInstance $serverName)) {
-                Write-Host 'ERROR:' $CRaddress 'is not a valid gateway address, please check the DNS resolution' -ForegroundColor Red
-                continue
-            }
-            Write-Host 'The server' $serverName 'is running on' $gateway.Region
-            Write-Host
-            CheckAffected20191014 $gateway
-        }
-
-        Write-Host 'Running tests...please wait' -ForegroundColor Yellow
-        foreach ($gatewayAddress in $gateway.Gateways) {
-            $testResult = Test-NetConnection $gatewayAddress -Port $gatewayPort -WarningAction SilentlyContinue
-
-            if ($testResult.TcpTestSucceeded) {
-                Write-Host 'Tested (gateway) connectivity to' $gatewayAddress':'$gatewayPort' -> TCP test succeed' -ForegroundColor Green
-            }
-            else {
+        foreach ($serverName in $serversToCheck) {
+            if ($serverName -and $serverName.Length -gt 0) {
+                if (!$serverName.EndsWith('.database.windows.net')) {
+                    $serverName = $serverName + '.database.windows.net'
+                }
                 Write-Host
-                Write-Host 'Tested (gateway) connectivity to' $gatewayAddress':'$gatewayPort' -> TCP test FAILED' -ForegroundColor Red
-                Write-Host 'Please make sure you fix the connectivity from this machine to' $gatewayAddress':'$gatewayPort' to avoid issues!' -ForegroundColor Red
-                Write-Host
-                Write-Host 'IP routes for interface:' $testResult.InterfaceAlias
-                Get-NetAdapter $testResult.InterfaceAlias | Get-NetRoute
-                tracert -h 10 $serverName
-            }
-        }
+                Write-Host '************************************************************************************' -ForegroundColor Yellow
+                Write-Host 'Testing' $serverName -ForegroundColor Yellow
+                Write-Host '************************************************************************************' -ForegroundColor Yellow
+                ValidateDNS $serverName
 
-        if ($gateway.TRs) {
-            Write-Host
-            Write-Host 'Redirect Policy related tests:'
-            $redirectSucceeded = 0
-            $redirectTests = 0
-            foreach ($tr in $gateway.TRs) {
-                foreach ($port in $TRPorts) {
-                    $testRedirectResults = Test-NetConnection $tr -Port $port -WarningAction SilentlyContinue
-                    if ($testRedirectResults.TcpTestSucceeded) {
-                        $redirectTests += 1
-                        $redirectSucceeded += 1
-                        Write-Host 'Tested (redirect) connectivity to' $tr':'$port '-> TCP test succeeded' -ForegroundColor White
+                try {
+                    $CR = [System.Net.DNS]::GetHostEntry($ServerName)
+                }
+                catch {
+                    Write-Host ' ERROR: Name resolution of' $serverName 'failed' -ForegroundColor Red
+                    continue
+                }
+                $CRaddress = $CR.AddressList[0].IPAddressToString
+                Write-Host ' The current gateway IP address is ' -ForegroundColor White -NoNewline
+                Write-Host $CRaddress -ForegroundColor Yellow
+                $gatewayPort = 1433
+
+                if (IsManagedInstance $serverName) {
+                    if (IsManagedInstancePublicEndpoint $serverName) {
+                        $gatewayPort = 3342
+                        Write-Host ' Detected as Managed Instance using Public Endpoint' -ForegroundColor Yellow
                     }
                     else {
-                        $redirectTests += 1
-                        Write-Host 'Tested (redirect) connectivity to' $tr':'$port '-> TCP test FAILED' -ForegroundColor White
+                        Write-Host ' Detected as Managed Instance' -ForegroundColor Yellow
+                    }
+                    $gateway = New-Object PSObject -Property @{Gateways = ($CRaddress) }
+                }
+                else {
+                    $gateway = $gateways | Where-Object { $_.Gateways -eq $CRaddress }
+                    if (!$gateway -and !(IsManagedInstance $serverName)) {
+                        Write-Host ' ERROR:' $CRaddress 'is not a valid gateway address, please check the DNS resolution' -ForegroundColor Red
+                        continue
+                    }
+                    Write-Host ' The server' $serverName 'is running on ' -ForegroundColor White -NoNewline
+                    Write-Host $gateway.Region -ForegroundColor Yellow
+                    #Write-Host
+                    #CheckAffected20191014 $gateway
+                }
+                Write-Host
+                Write-Host 'Gateway connectivity tests:' -ForegroundColor Green
+                foreach ($gatewayAddress in $gateway.Gateways) {
+                    Write-Host ' Testing (gateway) connectivity to' $gatewayAddress':'$gatewayPort -ForegroundColor White -NoNewline
+                    $testResult = Test-NetConnection $gatewayAddress -Port $gatewayPort -WarningAction SilentlyContinue
+
+                    if ($testResult.TcpTestSucceeded) {
+                        Write-Host ' -> TCP test succeed' -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host ' -> TCP test FAILED' -ForegroundColor Red
+                        Write-Host ' Please make sure you fix the connectivity from this machine to' $gatewayAddress':'$gatewayPort' to avoid issues!' -ForegroundColor Red
+                        Write-Host
+                        Write-Host ' IP routes for interface:' $testResult.InterfaceAlias
+                        Get-NetAdapter $testResult.InterfaceAlias | Get-NetRoute
+                        tracert -h 10 $serverName
                     }
                 }
+
+                if ($gateway.TRs) {
+                    Write-Host
+                    Write-Host 'Redirect Policy related tests:' -ForegroundColor Green
+                    $redirectSucceeded = 0
+                    $redirectTests = 0
+                    foreach ($tr in $gateway.TRs) {
+                        foreach ($port in $TRPorts) {
+                            Write-Host ' Tested (redirect) connectivity to' $tr':'$port -ForegroundColor White -NoNewline
+                            $testRedirectResults = Test-NetConnection $tr -Port $port -WarningAction SilentlyContinue
+                            if ($testRedirectResults.TcpTestSucceeded) {
+                                $redirectTests += 1
+                                $redirectSucceeded += 1
+                                Write-Host ' -> TCP test succeeded' -ForegroundColor Green
+                            }
+                            else {
+                                $redirectTests += 1
+                                Write-Host ' -> TCP test FAILED' -ForegroundColor Red
+                            }
+                        }
+                    }
+                    Write-Host ' Tested (redirect) connectivity' $redirectTests 'times and' $redirectSucceeded 'of them succeeded' -ForegroundColor Yellow
+                    Write-Host ' Please note this was just some tests to check connectivity using the 11000-11999 port range, not your database' -ForegroundColor Yellow
+                    if ($redirectSucceeded / $redirectTests -ge 0.5 ) {
+                        Write-Host ' Based on the result it is likely the Redirect Policy will work from this machine' -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host ' Based on the result the Redirect Policy MAY NOT work from this machine, this can be expected for connections from outside Azure' -ForegroundColor Red
+                    }
+                    Write-Host ' Please check more about Azure SQL Connectivity Architecture at https://docs.microsoft.com/en-us/azure/sql-database/sql-database-connectivity-architecture' -ForegroundColor Yellow
+                }
+
+                Write-Host
+                Write-Host Testing dummy connecting to master database: -ForegroundColor Green
+                Try {
+                    $masterDbConnection = New-Object System.Data.SqlClient.SQLConnection
+                    $masterDbConnection.ConnectionString = [string]::Format("Server=tcp:{0},{1};Initial Catalog=master;Persist Security Info=False;User ID=AzureSQLDBConnectivityChecker;Password=ThisIsJustATest;MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;",
+                        $serverName, $gatewayPort)
+                    $masterDbConnection.Open()
+                }
+                catch [System.Data.SqlClient.SqlException] {
+                    Write-Host ' '$_.Exception.Message -ForegroundColor Yellow
+                    if ($_.Exception.Number -eq 18456) {
+                        Write-Host ' Dummy login attempt reached master database, login with dummy credentials failed as expected' -ForegroundColor Green
+                    }
+                }
+                Catch {
+                    Write-Host $_.Exception.Message -ForegroundColor Yellow
+                }
             }
-            Write-Host
-            Write-Host 'Tested (redirect) connectivity' $redirectTests 'times and' $redirectSucceeded 'of them succeeded' -ForegroundColor Green
-            Write-Host
-            Write-Host 'Please note this was just some tests to check connectivity using the 11000-11999 port range, not your database' -ForegroundColor Yellow
-            if ($redirectSucceeded / $redirectTests -ge 0.5 ) {
-                Write-Host 'Based on the result it is likely the Redirect Policy will work from this machine' -ForegroundColor Green
+        }
+        Write-Host
+        Write-Host 'All tests are now done!' -ForegroundColor Green
+    }
+    Finally {
+        if ($canWriteFiles) {
+            Try {
+                Stop-Transcript | Out-Null
             }
-            else {
-                Write-Host 'Based on the result the Redirect Policy MAY NOT work from this machine, this can be expected for connections from outside Azure' -ForegroundColor Red
-            }
-            Write-Host 'Please check more about Azure SQL Connectivity Architecture at https://docs.microsoft.com/en-us/azure/sql-database/sql-database-connectivity-architecture' -ForegroundColor Yellow
-            Write-Host
+            Catch [System.InvalidOperationException] { }
+            FilterTranscript
         }
     }
 }
-Write-Host 'All tests are now done!' -ForegroundColor Green
+Finally {
+    if ($canWriteFiles) {
+        Write-Host Files can be found at (Get-Location).Path
+        Invoke-Item (Get-Location).Path
+    }
+}
