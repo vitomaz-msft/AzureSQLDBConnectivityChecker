@@ -14,7 +14,8 @@ $parameters = @{
     Server = '.database.windows.net'
     Database = ''
 }
- 
+ 
+$ProgressPreference = "SilentlyContinue";
 $scriptUrlBase = 'raw.githubusercontent.com/vitomaz-msft/AzureSQLDBConnectivityChecker/master/'
 Invoke-Command -ScriptBlock ([Scriptblock]::Create((iwr ($scriptUrlBase+'/AzureSQLDBConnectivityChecker.ps1')).Content)) -ArgumentList $parameters
 #end
