@@ -7,7 +7,7 @@ This PowerShell script will run some connectivity checks from this machine to th
  
 2. Open a New Script window
  
-3. Paste the following in the script window (please note that, except databases and credentials, the other parameters are optional):
+3. Paste the following in the script window:
 
 ```powershell
 $parameters = @{
