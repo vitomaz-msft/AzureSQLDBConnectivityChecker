@@ -167,7 +167,7 @@ Try {
         | Add-Member -PassThru NoteProperty baseType 'EventData' `
         | Add-Member -PassThru NoteProperty baseData (New-Object PSObject `
             | Add-Member -PassThru NoteProperty ver 2 `
-            | Add-Member -PassThru NoteProperty name '0.8'));
+            | Add-Member -PassThru NoteProperty name '0.8.0'));
 
     $body = $body | ConvertTo-JSON -depth 5;
     Invoke-WebRequest -Uri 'https://dc.services.visualstudio.com/v2/track' -Method 'POST' -UseBasicParsing -body $body > $null
